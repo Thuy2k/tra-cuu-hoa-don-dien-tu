@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: Tra Cuu Hoa Don Dien Tu
- * Description: Trang tra cuu hoa don dien tu cong khai theo blog_id va order_code, tai su dung template hoa don tu plugin tgs_pos.
+ * Description: Trang tra cuu hoa don dien tu cong khai theo ma hoa don (ho tro tu suy ra blog_id tu prefix HD{blog_id}_), tai su dung template hoa don tu plugin tgs_pos.
  * Version: 1.0.0
  * Author: TGS
  * Network: true
@@ -87,12 +87,22 @@ final class TGS_Invoice_Lookup_Public
                         if (!empty($payload['exp']) && intval($payload['exp']) < time()) {
                             $token_error = 'Link tra cứu đã hết hạn.';
                         } else {
-                            $blog_id = intval($payload['blog_id'] ?? 0);
                             $order_code = sanitize_text_field((string) ($payload['order_code'] ?? ''));
+                            $blog_id = intval($payload['blog_id'] ?? 0);
+
+                            // Nếu token không có blog_id, thử suy ra từ mã hóa đơn.
+                            if ($blog_id <= 0) {
+                                $blog_id = self::extract_blog_id_from_order_code($order_code);
+                            }
                         }
                     }
                 }
             }
+        }
+
+        // Ưu tiên suy ra từ mã hóa đơn nếu chưa có blog_id rõ ràng.
+        if ($blog_id <= 0 && $order_code !== '') {
+            $blog_id = self::extract_blog_id_from_order_code($order_code);
         }
 
         return [
@@ -142,6 +152,26 @@ final class TGS_Invoice_Lookup_Public
         return isset($labels[$method]) ? $labels[$method] : strtoupper($method ?: 'cash');
     }
 
+    /**
+     * Tách blog_id từ mã đơn dạng HD{blog_id}_{suffix}.
+     *
+     * @param string $order_code
+     * @return int
+     */
+    private static function extract_blog_id_from_order_code($order_code)
+    {
+        $order_code = strtoupper(trim((string) $order_code));
+        if ($order_code === '') {
+            return 0;
+        }
+
+        if (preg_match('/^HD(\d+)_([A-Z0-9]+)$/', $order_code, $m)) {
+            return intval($m[1]);
+        }
+
+        return 0;
+    }
+
     private static function get_order_data($blog_id, $order_code)
     {
         global $wpdb;
@@ -149,11 +179,16 @@ final class TGS_Invoice_Lookup_Public
         $blog_id = intval($blog_id);
         $order_code = strtoupper(trim((string) $order_code));
 
-        if ($blog_id <= 0) {
-            return ['success' => false, 'message' => 'Thiếu blog_id để tra cứu.'];
-        }
         if ($order_code === '') {
             return ['success' => false, 'message' => 'Thiếu mã đơn để tra cứu.'];
+        }
+
+        if ($blog_id <= 0) {
+            $blog_id = self::extract_blog_id_from_order_code($order_code);
+        }
+
+        if ($blog_id <= 0) {
+            return ['success' => false, 'message' => 'Không xác định được cửa hàng từ mã đơn. Vui lòng nhập mã đúng định dạng HD{blog_id}_...'];
         }
 
         $switched = false;
@@ -452,13 +487,13 @@ final class TGS_Invoice_Lookup_Public
 
         if ($params['token_error'] !== '') {
             $lookup['message'] = $params['token_error'];
-        } elseif ($params['blog_id'] > 0 && $params['order_code'] !== '') {
+        } elseif ($params['order_code'] !== '') {
             $lookup = self::get_order_data($params['blog_id'], $params['order_code']);
             if (empty($lookup['success']) && empty($lookup['message'])) {
                 $lookup['message'] = 'Không thể tra cứu hóa đơn vào lúc này.';
             }
         } elseif ($params['has_query']) {
-            $lookup['message'] = 'Vui lòng cung cấp đầy đủ blog_id và order_code.';
+            $lookup['message'] = 'Vui lòng nhập mã đơn để tra cứu.';
         }
 
         $payload = [
@@ -522,16 +557,11 @@ final class TGS_Invoice_Lookup_Public
         <h1 class="text-xl sm:text-2xl font-bold text-slate-900 mb-1">Tra cứu hóa đơn điện tử</h1>
       </div>
 
-      <form method="get" action="" class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
-        <div>
-          <label for="blog_id" class="block text-xs font-semibold text-slate-600 mb-1">Blog ID</label>
-          <input id="blog_id" name="blog_id" type="number" min="1" value="<?php echo esc_attr($params['blog_id']); ?>"
-                 class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="Ví dụ: 7" required />
-        </div>
+            <form method="get" action="" class="grid grid-cols-1 sm:grid-cols-4 gap-3 mb-4">
         <div>
           <label for="order_code" class="block text-xs font-semibold text-slate-600 mb-1">Mã đơn</label>
           <input id="order_code" name="order_code" type="text" value="<?php echo esc_attr($params['order_code']); ?>"
-                 class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="Ví dụ: HD0355" required />
+                                 class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="Ví dụ: HD1_A4K9Q" required />
         </div>
         <div class="flex items-end">
           <button type="submit" class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700">
