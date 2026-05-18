@@ -309,19 +309,16 @@ final class TGS_Invoice_Lookup_Public
                     }
                 }
 
-                $price_before_tax = floatval($item['local_product_price'] ?? $item['price'] ?? 0);
-                $price_after_tax = floatval($item['local_product_price_after_tax'] ?? $price_before_tax);
-                $tax = floatval($item['tax'] ?? 0);
+                $price_before_tax = floatval($item['price'] ?? 0); // đơn giá thực tế trong ledger (trước thuế)
+                $tax = floatval($item['local_ledger_item_tax_percent'] ?? $item['tax'] ?? 0);
+                $price_with_tax = round($price_before_tax * (1 + $tax / 100));
+                $discount_pct = floatval($item['local_ledger_item_discount'] ?? 0);
+                $discount_after_tax = floatval($item['local_ledger_item_discount_after_tax'] ?? $discount_pct);
+                $discount_amount_after_tax = floatval($item['local_ledger_item_discount_amount_after_tax'] ?? 0);
                 $item_note = (string) ($item['local_ledger_item_note'] ?? '');
-                $item_qty = intval($item['local_ledger_item_qty'] ?? $item['quantity'] ?? 1);
+                $item_qty = intval($item['quantity'] ?? $item['local_ledger_item_qty'] ?? 1);
 
-                $is_gift = false;
-                if (!empty($item_meta['is_gift'])) {
-                    $is_gift = true;
-                }
-                if (stripos($item_note, 'Quà tặng KM') !== false) {
-                    $is_gift = true;
-                }
+                $is_gift = intval($item['local_ledger_item_gift_type'] ?? 0) === 1;
 
                 if ($is_gift) {
                     $gift_products[] = [
@@ -335,9 +332,13 @@ final class TGS_Invoice_Lookup_Public
                     $result_items[] = [
                         'name' => (string) ($item['product_name'] ?? $item['local_product_name'] ?? 'Sản phẩm'),
                         'qty' => $item_qty,
-                        'price' => $price_after_tax,
+                        'price' => $price_with_tax,          // đơn giá sau thuế (tính từ giá thực tế trong ledger)
                         'price_before_tax' => $price_before_tax,
                         'tax' => $tax,
+                        'htsoft_discount' => $discount_after_tax > 0 ? $discount_after_tax : null, // CK% cho hiển thị bill
+                        'discount' => $discount_pct,
+                        'discount_after_tax' => $discount_after_tax,
+                        'discount_amount_after_tax' => $discount_amount_after_tax,
                         'barcode_main' => (string) ($item['barcode_main'] ?? ''),
                         'lot_barcodes' => $lot_barcodes,
                         'lot_details' => $lot_details,
