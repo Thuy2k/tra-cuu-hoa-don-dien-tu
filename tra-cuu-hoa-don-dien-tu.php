@@ -11,6 +11,8 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+require_once __DIR__ . '/includes/class-tgs-invoice-lookup-global-products.php';
+
 final class TGS_Invoice_Lookup_Public
 {
     private const LOOKUP_SLUG = 'tra-cuu-hoa-don-dien-tu';
@@ -201,9 +203,8 @@ final class TGS_Invoice_Lookup_Public
             $ledger_table = $wpdb->prefix . 'local_ledger';
             $item_table = $wpdb->prefix . 'local_ledger_item';
             $person_table = $wpdb->prefix . 'local_ledger_person';
-            $product_table = $wpdb->prefix . 'local_product_name';
             $meta_table = $wpdb->prefix . 'local_ledger_meta';
-            $lot_table = defined('TGS_TABLE_GLOBAL_PRODUCT_LOTS') ? TGS_TABLE_GLOBAL_PRODUCT_LOTS : 'wp_global_product_lots';
+            $lot_table = TGS_Invoice_Lookup_Global_Products::global_lot_table();
 
             if (!self::table_exists($ledger_table)) {
                 return ['success' => false, 'message' => 'Cửa hàng chưa có bảng đơn hàng POS.'];
@@ -249,18 +250,17 @@ final class TGS_Invoice_Lookup_Public
             }
 
             $items = [];
-            if (self::table_exists($item_table) && self::table_exists($product_table)) {
+            if (self::table_exists($item_table)) {
                 $items = $wpdb->get_results(
                     $wpdb->prepare(
-                        "SELECT li.*, pn.local_product_name AS product_name, pn.local_product_barcode_main AS barcode_main,
-                                pn.local_product_tax AS tax, pn.local_product_price, pn.local_product_price_after_tax
+                        "SELECT li.*
                          FROM $item_table li
-                         LEFT JOIN $product_table pn ON li.local_product_name_id = pn.local_product_name_id
                          WHERE li.local_ledger_id = %d AND (li.is_deleted = 0 OR li.is_deleted IS NULL)",
                         $items_ledger_id
                     ),
                     ARRAY_A
                 );
+                $items = TGS_Invoice_Lookup_Global_Products::enrich_ledger_items((array) $items, $blog_id);
             }
 
             $result_items = [];
@@ -317,20 +317,21 @@ final class TGS_Invoice_Lookup_Public
                 $discount_amount_after_tax = floatval($item['local_ledger_item_discount_amount_after_tax'] ?? 0);
                 $item_note = (string) ($item['local_ledger_item_note'] ?? '');
                 $item_qty = intval($item['quantity'] ?? $item['local_ledger_item_qty'] ?? 1);
+                $display_name = trim((string) ($item['product_name'] ?? $item['local_product_name'] ?? ''));
 
                 $is_gift = intval($item['local_ledger_item_gift_type'] ?? 0) === 1;
 
                 if ($is_gift) {
                     $gift_products[] = [
-                        'productName' => (string) ($item['product_name'] ?? $item['local_product_name'] ?? 'Sản phẩm tặng'),
-                        'productId' => intval($item['local_product_name_id'] ?? 0),
+                        'productName' => $display_name !== '' ? $display_name : 'Sản phẩm tặng',
+                        'productId' => intval($item['global_product_name_id'] ?? $item['local_product_name_id'] ?? 0),
                         'quantity' => $item_qty,
                         'lotDetails' => $lot_details,
                         'note' => $item_note,
                     ];
                 } else {
                     $result_items[] = [
-                        'name' => (string) ($item['product_name'] ?? $item['local_product_name'] ?? 'Sản phẩm'),
+                        'name' => $display_name !== '' ? $display_name : 'Sản phẩm',
                         'qty' => $item_qty,
                         'price' => $price_with_tax,          // đơn giá sau thuế (tính từ giá thực tế trong ledger)
                         'price_before_tax' => $price_before_tax,
@@ -342,8 +343,8 @@ final class TGS_Invoice_Lookup_Public
                         'barcode_main' => (string) ($item['barcode_main'] ?? ''),
                         'lot_barcodes' => $lot_barcodes,
                         'lot_details' => $lot_details,
-                        'sku' => (string) ($item_meta['sku'] ?? ''),
-                        'unit' => (string) ($item_meta['unit'] ?? ''),
+                        'sku' => (string) ($item['global_product_sku'] ?? $item_meta['sku'] ?? ''),
+                        'unit' => (string) ($item['global_product_unit'] ?? $item_meta['unit'] ?? ''),
                     ];
                 }
             }
