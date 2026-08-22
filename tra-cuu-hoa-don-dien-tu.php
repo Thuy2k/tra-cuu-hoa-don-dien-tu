@@ -1,17 +1,38 @@
 <?php
 /**
  * Plugin Name: Tra Cuu Hoa Don Dien Tu
- * Description: Trang tra cuu hoa don dien tu cong khai theo ma hoa don (ho tro tu suy ra blog_id tu prefix HD{blog_id}_), tai su dung template hoa don tu plugin tgs_pos.
- * Version: 1.0.0
+ * Description: Trang tra cuu hoa don dien tu cong khai theo ma don. Suy ra dung shop tu ma (wp_blogs.tgs_site_code), va dung lai nguyen mau bill cua tgs_pos.
+ * Version: 2.0.0
  * Author: TGS
  * Network: true
+ *
+ * =============================================================================
+ * TRANG NÀY IN RA BILL Y HỆT BILL GIẤY Ở QUẦY
+ *
+ * Không có mẫu bill riêng ở đây. Cả dữ liệu lẫn hình thức đều mượn của tgs_pos:
+ *
+ *   - Số liệu : TGS_POS_Ajax_Order::get_order_receipt_data()
+ *               (đúng hàm màn Đơn hàng dùng để in lại bill)
+ *   - Hình thức: window.TGSReceiptTemplate.generate() + getSkinStyles()
+ *               (đúng module dựng bill lúc bán)
+ *
+ * ⚠ SỬA BILL Ở ĐÂU: sửa trong tgs_pos, KHÔNG sửa ở plugin này. Sửa ở đây là
+ * bill trên mạng khác bill khách cầm trong tay. Xem docs/bill-va-tra-cuu.md.
+ *
+ * ── MỖI SHOP MỘT BẢNG local_ledger ─────────────────────────────────────────
+ *
+ * Đây là mạng nhiều site, mỗi shop một bộ bảng riêng. Nên phải suy ra shop từ
+ * mã đơn rồi switch_to_blog() mới đọc đúng phiếu — xem
+ * TGS_Invoice_Lookup_Resolver.
+ * =============================================================================
  */
 
 if (!defined('ABSPATH')) {
     exit;
 }
 
-require_once __DIR__ . '/includes/class-tgs-invoice-lookup-global-products.php';
+require_once __DIR__ . '/includes/class-tgs-invoice-lookup-resolver.php';
+require_once __DIR__ . '/includes/class-tgs-invoice-lookup-bills.php';
 
 final class TGS_Invoice_Lookup_Public
 {
@@ -61,6 +82,15 @@ final class TGS_Invoice_Lookup_Public
         return base64_decode($input, true);
     }
 
+    /**
+     * Đọc tham số tra cứu.
+     *
+     * Ba đường vào, đều dẫn tới cùng một chỗ:
+     *   ?order_code=...          — khách tự gõ, hoặc nút "TRA CỨU HÓA ĐƠN" trên
+     *                              tin Zalo ZNS (tham số `hoadon` của template)
+     *   ?order_code=...&blog_id= — ép đúng shop, khỏi phải suy từ mã
+     *   ?q=<token>               — link có chữ ký, dùng khi cần giới hạn hạn dùng
+     */
     private static function parse_request()
     {
         $blog_id = isset($_GET['blog_id']) ? intval($_GET['blog_id']) : 0;
@@ -85,415 +115,39 @@ final class TGS_Invoice_Lookup_Public
 
                     if (!is_array($payload)) {
                         $token_error = 'Token tra cứu không hợp lệ (payload lỗi).';
+                    } elseif (!empty($payload['exp']) && intval($payload['exp']) < time()) {
+                        $token_error = 'Link tra cứu đã hết hạn.';
                     } else {
-                        if (!empty($payload['exp']) && intval($payload['exp']) < time()) {
-                            $token_error = 'Link tra cứu đã hết hạn.';
-                        } else {
-                            $order_code = sanitize_text_field((string) ($payload['order_code'] ?? ''));
-                            $blog_id = intval($payload['blog_id'] ?? 0);
-
-                            // Nếu token không có blog_id, thử suy ra từ mã hóa đơn.
-                            if ($blog_id <= 0) {
-                                $blog_id = self::extract_blog_id_from_order_code($order_code);
-                            }
-                        }
+                        $order_code = sanitize_text_field((string) ($payload['order_code'] ?? ''));
+                        $blog_id = intval($payload['blog_id'] ?? 0);
                     }
                 }
             }
         }
 
-        // Ưu tiên suy ra từ mã hóa đơn nếu chưa có blog_id rõ ràng.
-        if ($blog_id <= 0 && $order_code !== '') {
-            $blog_id = self::extract_blog_id_from_order_code($order_code);
-        }
-
         return [
             'blog_id' => $blog_id,
-            'order_code' => strtoupper($order_code),
+            'order_code' => TGS_Invoice_Lookup_Resolver::normalize_code($order_code),
             'token_error' => $token_error,
             'has_query' => ($blog_id > 0 || $order_code !== '' || $token !== ''),
         ];
     }
 
-    private static function table_exists($table_name)
-    {
-        global $wpdb;
-
-        $table_name = (string) $table_name;
-        if ($table_name === '') {
-            return false;
-        }
-
-        $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table_name));
-
-        return $found === $table_name;
-    }
-
-    private static function payment_label($method, $note = '')
-    {
-        $method = sanitize_text_field((string) $method);
-        $note = sanitize_text_field((string) $note);
-
-        if ($note !== '' && preg_match('/QR Payment \\((.*?)\\)/', $note, $matches)) {
-            return strtoupper(trim($matches[1]));
-        }
-
-        if (strpos($method, 'ttck_up_') === 0) {
-            return strtoupper($method);
-        }
-
-        $labels = [
-            'cash' => 'Tiền mặt',
-            'transfer' => 'Chuyển khoản',
-            'bank_transfer' => 'Chuyển khoản',
-            'card' => 'Thẻ',
-            'qr' => 'QR CODE',
-            'split' => 'Hỗn hợp',
-        ];
-
-        return isset($labels[$method]) ? $labels[$method] : strtoupper($method ?: 'cash');
-    }
-
-    /**
-     * Tách blog_id từ mã đơn dạng HD{blog_id}_{suffix}.
-     *
-     * @param string $order_code
-     * @return int
-     */
-    private static function extract_blog_id_from_order_code($order_code)
-    {
-        $order_code = strtoupper(trim((string) $order_code));
-        if ($order_code === '') {
-            return 0;
-        }
-
-        if (preg_match('/^HD(\d+)_([A-Z0-9]+)$/', $order_code, $m)) {
-            return intval($m[1]);
-        }
-
-        return 0;
-    }
-
-    private static function get_order_data($blog_id, $order_code)
-    {
-        global $wpdb;
-
-        $blog_id = intval($blog_id);
-        $order_code = strtoupper(trim((string) $order_code));
-
-        if ($order_code === '') {
-            return ['success' => false, 'message' => 'Thiếu mã đơn để tra cứu.'];
-        }
-
-        if ($blog_id <= 0) {
-            $blog_id = self::extract_blog_id_from_order_code($order_code);
-        }
-
-        if ($blog_id <= 0) {
-            return ['success' => false, 'message' => 'Không xác định được cửa hàng từ mã đơn. Vui lòng nhập mã đúng định dạng HD{blog_id}_...'];
-        }
-
-        $switched = false;
-        if (get_current_blog_id() !== $blog_id) {
-            switch_to_blog($blog_id);
-            $switched = true;
-        }
-
-        try {
-            $ledger_table = $wpdb->prefix . 'local_ledger';
-            $item_table = $wpdb->prefix . 'local_ledger_item';
-            $person_table = $wpdb->prefix . 'local_ledger_person';
-            $meta_table = $wpdb->prefix . 'local_ledger_meta';
-            $lot_table = TGS_Invoice_Lookup_Global_Products::global_lot_table();
-
-            if (!self::table_exists($ledger_table)) {
-                return ['success' => false, 'message' => 'Cửa hàng chưa có bảng đơn hàng POS.'];
-            }
-
-            $type_sale_order = defined('TGS_LEDGER_TYPE_SALE_ORDER') ? intval(TGS_LEDGER_TYPE_SALE_ORDER) : 10;
-            $type_sale = defined('TGS_LEDGER_TYPE_SALE') ? intval(TGS_LEDGER_TYPE_SALE) : 12;
-
-            $order = $wpdb->get_row(
-                $wpdb->prepare(
-                    "SELECT l.*, p.local_ledger_person_name, p.local_ledger_person_phone, p.user_wp_id
-                     FROM $ledger_table l
-                     LEFT JOIN $person_table p ON l.local_ledger_person_id = p.local_ledger_person_id
-                     WHERE l.local_ledger_code = %s AND (l.is_deleted = 0 OR l.is_deleted IS NULL)
-                     ORDER BY (l.local_ledger_type = %d) DESC, l.local_ledger_id DESC
-                     LIMIT 1",
-                    $order_code,
-                    $type_sale_order
-                )
-            );
-
-            if (!$order) {
-                return ['success' => false, 'message' => 'Không tìm thấy đơn hàng với mã đã nhập.'];
-            }
-
-            $items_ledger_id = intval($order->local_ledger_id);
-            if (intval($order->local_ledger_type) === $type_sale_order) {
-                $child_ledger = $wpdb->get_row(
-                    $wpdb->prepare(
-                        "SELECT local_ledger_id FROM $ledger_table
-                         WHERE local_ledger_parent_id = %d
-                           AND local_ledger_type = %d
-                           AND (is_deleted = 0 OR is_deleted IS NULL)
-                         ORDER BY local_ledger_id DESC
-                         LIMIT 1",
-                        $items_ledger_id,
-                        $type_sale
-                    )
-                );
-                if ($child_ledger) {
-                    $items_ledger_id = intval($child_ledger->local_ledger_id);
-                }
-            }
-
-            $items = [];
-            if (self::table_exists($item_table)) {
-                $items = $wpdb->get_results(
-                    $wpdb->prepare(
-                        "SELECT li.*
-                         FROM $item_table li
-                         WHERE li.local_ledger_id = %d AND (li.is_deleted = 0 OR li.is_deleted IS NULL)",
-                        $items_ledger_id
-                    ),
-                    ARRAY_A
-                );
-                $items = TGS_Invoice_Lookup_Global_Products::enrich_ledger_items((array) $items, $blog_id);
-            }
-
-            $result_items = [];
-            $gift_products = [];
-
-            foreach ((array) $items as $item) {
-                $lot_barcodes = [];
-                $lot_details = [];
-                $item_meta = [];
-
-                if (!empty($item['local_ledger_item_meta'])) {
-                    $decoded_meta = json_decode($item['local_ledger_item_meta'], true);
-                    if (is_array($decoded_meta)) {
-                        $item_meta = $decoded_meta;
-                    }
-                }
-
-                if (!empty($item['list_product_lots']) && self::table_exists($lot_table)) {
-                    $lot_ids = json_decode($item['list_product_lots'], true);
-                    if (is_array($lot_ids) && !empty($lot_ids)) {
-                        $lot_ids = array_filter(array_map('intval', $lot_ids));
-                        if (!empty($lot_ids)) {
-                            $lot_ids_str = implode(',', $lot_ids);
-                            $lots = $wpdb->get_results(
-                                "SELECT global_product_lot_barcode AS lot_barcode, lot_code, exp_date, mfg_date
-                                 FROM $lot_table
-                                 WHERE global_product_lot_id IN ($lot_ids_str)",
-                                ARRAY_A
-                            );
-
-                            foreach ((array) $lots as $lot) {
-                                $barcode = (string) ($lot['lot_barcode'] ?? '');
-                                $lot_code = (string) ($lot['lot_code'] ?? '');
-                                $exp_date = !empty($lot['exp_date']) ? date('d/m/Y', strtotime((string) $lot['exp_date'])) : null;
-                                $mfg_date = !empty($lot['mfg_date']) ? date('d/m/Y', strtotime((string) $lot['mfg_date'])) : null;
-
-                                $lot_barcodes[] = $barcode;
-                                $lot_details[] = [
-                                    'barcode' => $barcode,
-                                    'lot_code' => $lot_code,
-                                    'exp_date' => $exp_date,
-                                    'mfg_date' => $mfg_date,
-                                ];
-                            }
-                        }
-                    }
-                }
-
-                $price_before_tax = floatval($item['price'] ?? 0); // đơn giá thực tế trong ledger (trước thuế)
-                $tax = floatval($item['local_ledger_item_tax_percent'] ?? $item['tax'] ?? 0);
-                $price_with_tax = round($price_before_tax * (1 + $tax / 100));
-                $discount_pct = floatval($item['local_ledger_item_discount'] ?? 0);
-                $discount_after_tax = floatval($item['local_ledger_item_discount_after_tax'] ?? $discount_pct);
-                $discount_amount_after_tax = floatval($item['local_ledger_item_discount_amount_after_tax'] ?? 0);
-                $item_note = (string) ($item['local_ledger_item_note'] ?? '');
-                $item_qty = intval($item['quantity'] ?? $item['local_ledger_item_qty'] ?? 1);
-                $display_name = trim((string) ($item['product_name'] ?? $item['local_product_name'] ?? ''));
-
-                $is_gift = intval($item['local_ledger_item_gift_type'] ?? 0) === 1;
-
-                if ($is_gift) {
-                    $gift_products[] = [
-                        'productName' => $display_name !== '' ? $display_name : 'Sản phẩm tặng',
-                        'productId' => intval($item['global_product_name_id'] ?? $item['local_product_name_id'] ?? 0),
-                        'quantity' => $item_qty,
-                        'lotDetails' => $lot_details,
-                        'note' => $item_note,
-                    ];
-                } else {
-                    $result_items[] = [
-                        'name' => $display_name !== '' ? $display_name : 'Sản phẩm',
-                        'qty' => $item_qty,
-                        'price' => $price_with_tax,          // đơn giá sau thuế (tính từ giá thực tế trong ledger)
-                        'price_before_tax' => $price_before_tax,
-                        'tax' => $tax,
-                        'htsoft_discount' => $discount_after_tax > 0 ? $discount_after_tax : null, // CK% cho hiển thị bill
-                        'discount' => $discount_pct,
-                        'discount_after_tax' => $discount_after_tax,
-                        'discount_amount_after_tax' => $discount_amount_after_tax,
-                        'barcode_main' => (string) ($item['barcode_main'] ?? ''),
-                        'lot_barcodes' => $lot_barcodes,
-                        'lot_details' => $lot_details,
-                        'sku' => (string) ($item['global_product_sku'] ?? $item_meta['sku'] ?? ''),
-                        'unit' => (string) ($item['global_product_unit'] ?? $item_meta['unit'] ?? ''),
-                    ];
-                }
-            }
-
-            $cashier_name = '';
-            if (!empty($order->user_id)) {
-                $cashier = get_userdata(intval($order->user_id));
-                if ($cashier) {
-                    $cashier_name = $cashier->display_name ? $cashier->display_name : $cashier->user_login;
-                }
-            }
-
-            $customer_user_login = '';
-            if (!empty($order->user_wp_id)) {
-                $customer_user = get_userdata(intval($order->user_wp_id));
-                if ($customer_user) {
-                    $customer_user_login = (string) $customer_user->user_login;
-                }
-            }
-
-            $applied_promotions = [];
-            $loyalty_points_earned = 0;
-            $discount = 0;
-            $points_used = 0;
-            $selected_rewards = [];
-            $issued_vouchers = [];
-            $loyalty_points_after = 0;
-            $payment_method = 'cash';
-            $payment_method_label = self::payment_label($payment_method);
-            $payment_receipts = [];
-
-            if (!empty($order->local_ledger_meta_id) && self::table_exists($meta_table)) {
-                $meta_value = $wpdb->get_var(
-                    $wpdb->prepare(
-                        "SELECT local_ledger_meta_value FROM $meta_table WHERE local_ledger_meta_id = %d",
-                        intval($order->local_ledger_meta_id)
-                    )
-                );
-
-                if ($meta_value) {
-                    $meta_data = json_decode($meta_value, true);
-                    if (is_array($meta_data)) {
-                        $applied_promotions = is_array($meta_data['applied_promotions'] ?? null) ? $meta_data['applied_promotions'] : [];
-                        $discount = floatval($meta_data['discount'] ?? 0);
-                        $points_used = intval($meta_data['points_used'] ?? 0);
-                        $selected_rewards = is_array($meta_data['selected_rewards'] ?? null) ? $meta_data['selected_rewards'] : [];
-                        $issued_vouchers = is_array($meta_data['issued_vouchers'] ?? null) ? $meta_data['issued_vouchers'] : [];
-                        $loyalty_points_earned = intval($meta_data['points_earned'] ?? 0);
-                        $loyalty_points_after = floatval($meta_data['loyalty_points_after'] ?? 0);
-
-                        $payment_method = sanitize_text_field((string) ($meta_data['payment_method'] ?? 'cash'));
-                        $payment_method_label = sanitize_text_field((string) ($meta_data['payment_method_label'] ?? self::payment_label($payment_method)));
-
-                        if (is_array($meta_data['payment_receipts'] ?? null)) {
-                            foreach ($meta_data['payment_receipts'] as $receipt) {
-                                if (!is_array($receipt)) {
-                                    continue;
-                                }
-                                $row_method = sanitize_text_field((string) ($receipt['method'] ?? 'cash'));
-                                $row_note = sanitize_textarea_field((string) ($receipt['note'] ?? ''));
-                                $payment_receipts[] = [
-                                    'method' => $row_method,
-                                    'label' => sanitize_text_field((string) ($receipt['label'] ?? self::payment_label($row_method, $row_note))),
-                                    'amount' => floatval($receipt['amount'] ?? 0),
-                                    'note' => $row_note,
-                                ];
-                            }
-                        }
-
-                        if ($loyalty_points_earned <= 0 && !empty($applied_promotions)) {
-                            foreach ($applied_promotions as $promo) {
-                                if (($promo['type'] ?? '') === 'loyalty_points') {
-                                    $loyalty_points_earned += intval($promo['points_earned'] ?? ($promo['calculated_result']['points_earned'] ?? 0));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (empty($payment_receipts)) {
-                $payment_receipts[] = [
-                    'method' => $payment_method,
-                    'label' => $payment_method_label,
-                    'amount' => floatval($order->local_ledger_total_amount ?? 0),
-                    'note' => '',
-                ];
-            }
-
-            $store = [
-                'name' => get_bloginfo('name'),
-                'logo' => (string) get_option('tgs_shop_logo', ''),
-                'defaultLogo' => content_url('plugins/tgs_pos/assets/images/logo.webp'),
-                'phone' => (string) get_option('tgs_shop_phone', '1900636605'),
-                'website' => (string) get_option('tgs_shop_website', 'www.thegioisua.com'),
-                'hours' => (string) get_option('tgs_shop_hours', '7h - 21h30'),
-            ];
-
-            return [
-                'success' => true,
-                'order' => [
-                    'id' => intval($order->local_ledger_id),
-                    'code' => (string) ($order->local_ledger_code ?? ''),
-                    'customer_name' => (string) ($order->local_ledger_person_name ?? 'Khách lẻ'),
-                    'customer_phone' => (string) ($order->local_ledger_person_phone ?? ''),
-                    'user_login' => $customer_user_login,
-                    'total' => floatval($order->local_ledger_total_amount ?? 0),
-                    'discount' => $discount,
-                    'created_at' => (string) ($order->created_at ?? ''),
-                    'items' => $result_items,
-                    'gift_products' => $gift_products,
-                    'applied_promotions' => $applied_promotions,
-                    'loyalty_points_earned' => $loyalty_points_earned,
-                    'points_used' => $points_used,
-                    'selected_rewards' => $selected_rewards,
-                    'issued_vouchers' => $issued_vouchers,
-                    'loyalty_points_after' => $loyalty_points_after,
-                    'cashier_name' => $cashier_name,
-                    'payment_method' => $payment_method,
-                    'payment_method_label' => $payment_method_label,
-                    'payment_receipts' => $payment_receipts,
-                    'sale_ledger_id' => $items_ledger_id,
-                ],
-                'store' => $store,
-            ];
-        } finally {
-            if ($switched) {
-                restore_current_blog();
-            }
-        }
-    }
-
     private static function render_page()
     {
         $params = self::parse_request();
+
         $lookup = [
             'success' => false,
             'message' => '',
-            'order' => null,
+            'bills' => [],
             'store' => null,
         ];
 
         if ($params['token_error'] !== '') {
             $lookup['message'] = $params['token_error'];
         } elseif ($params['order_code'] !== '') {
-            $lookup = self::get_order_data($params['blog_id'], $params['order_code']);
-            if (empty($lookup['success']) && empty($lookup['message'])) {
-                $lookup['message'] = 'Không thể tra cứu hóa đơn vào lúc này.';
-            }
+            $lookup = TGS_Invoice_Lookup_Bills::lookup($params['order_code'], $params['blog_id']);
         } elseif ($params['has_query']) {
             $lookup['message'] = 'Vui lòng nhập mã đơn để tra cứu.';
         }
@@ -505,7 +159,7 @@ final class TGS_Invoice_Lookup_Public
             ],
             'success' => !empty($lookup['success']),
             'message' => (string) ($lookup['message'] ?? ''),
-            'order' => !empty($lookup['success']) ? ($lookup['order'] ?? null) : null,
+            'bills' => !empty($lookup['success']) ? array_values((array) $lookup['bills']) : [],
             'store' => !empty($lookup['success']) ? ($lookup['store'] ?? null) : null,
         ];
 
@@ -519,109 +173,286 @@ final class TGS_Invoice_Lookup_Public
   <meta charset="<?php bloginfo('charset'); ?>" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Tra cứu hóa đơn điện tử</title>
-  <link rel="stylesheet" href="<?php echo esc_url(content_url('plugins/tgs_pos/assets/css/tailwind.min.css')); ?>" />
-  <link rel="stylesheet" href="<?php echo esc_url(content_url('plugins/tgs_pos/assets/css/pos-tailwind.css')); ?>" />
-  <link rel="stylesheet" href="<?php echo esc_url(content_url('plugins/tgs_pos/assets/css/pos-tailwind-utilities.css')); ?>" />
+
+  <?php
+  /*
+   * Manrope là font của bill in ở quầy (xem getSkinStyles trong
+   * pos-receipt-template.js). Không nạp thì trang tra cứu vẫn chạy nhưng chữ
+   * nhảy sang font hệ thống — nhìn đã ra một tờ bill khác.
+   */
+  ?>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" />
+
   <style>
     body {
       margin: 0;
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-      background: #f3f4f6;
-      color: #111827;
+      font-family: "Manrope", system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+      background: #f1f5f9;
+      color: #0f172a;
     }
-    .tgs-invoice-lookup-wrap {
-      max-width: 960px;
+
+    .tgs-lookup-wrap {
+      max-width: 760px;
       margin: 0 auto;
-      padding: 16px;
+      padding: 20px 14px 48px;
     }
-    .tgs-invoice-card {
-      background: #ffffff;
-      border: 1px solid #e5e7eb;
+
+    .tgs-lookup-card {
+      background: #fff;
+      border: 1px solid #e2e8f0;
       border-radius: 16px;
       box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+      padding: 18px;
     }
-    #receipt-content {
-      border-radius: 14px;
-      border: 1px solid #d1d5db;
-      background: #fff;
+
+    .tgs-lookup-title {
+      margin: 0 0 4px;
+      font-size: 20px;
+      font-weight: 800;
     }
-    @media (max-width: 640px) {
-      .tgs-invoice-lookup-wrap {
-        padding: 10px;
-      }
+
+    .tgs-lookup-sub {
+      margin: 0 0 16px;
+      font-size: 13px;
+      color: #64748b;
+    }
+
+    .tgs-lookup-form {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .tgs-lookup-form input {
+      flex: 1 1 240px;
+      min-width: 0;
+      padding: 11px 12px;
+      font-size: 15px;
+      font-family: inherit;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      /* Mã in hoa, khách gõ thường cũng ra đúng */
+      text-transform: uppercase;
+    }
+
+    .tgs-lookup-form button {
+      flex: 0 0 auto;
+      padding: 11px 26px;
+      font-size: 15px;
+      font-weight: 700;
+      font-family: inherit;
+      color: #fff;
+      background: #2563eb;
+      border: 0;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+
+    .tgs-lookup-form button:hover { background: #1d4ed8; }
+
+    .tgs-lookup-msg {
+      margin-top: 14px;
+      padding: 11px 13px;
+      font-size: 14px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+    }
+
+    .tgs-lookup-msg--error {
+      background: #fef2f2;
+      border-color: #fecaca;
+      color: #b91c1c;
+    }
+
+    .tgs-lookup-msg--ok {
+      background: #ecfdf5;
+      border-color: #a7f3d0;
+      color: #047857;
+    }
+
+    /* ── Tờ bill ────────────────────────────────────────────────────────── */
+
+    .tgs-bill {
+      margin-top: 18px;
+    }
+
+    .tgs-bill__label {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #475569;
+    }
+
+    .tgs-bill__label span {
+      padding: 3px 12px;
+      border-radius: 999px;
+      background: #e2e8f0;
+    }
+
+    .tgs-bill--split .tgs-bill__label span {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    /*
+     * Khổ giấy: nền trắng, bóng đổ nhẹ cho ra dáng tờ giấy. Bề ngang do chính
+     * skin của POS quy định (302px = 80mm), ở đây chỉ căn giữa.
+     */
+    .tgs-receipt-paper {
+      margin: 0 auto;
+      box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+      border-radius: 10px;
+    }
+
+    .tgs-lookup-note {
+      margin-top: 22px;
+      font-size: 12.5px;
+      line-height: 1.6;
+      color: #64748b;
+      text-align: center;
+    }
+
+    @media print {
+      .tgs-lookup-card,
+      .tgs-lookup-note,
+      .tgs-bill__label { display: none; }
+
+      body { background: #fff; }
+      .tgs-receipt-paper { box-shadow: none; border-radius: 0; }
     }
   </style>
 </head>
 <body>
-  <div class="tgs-invoice-lookup-wrap">
-    <div class="tgs-invoice-card p-4 sm:p-6">
-      <div class="mb-4">
-        <h1 class="text-xl sm:text-2xl font-bold text-slate-900 mb-1">Tra cứu hóa đơn điện tử</h1>
-      </div>
+  <div class="tgs-lookup-wrap">
+    <div class="tgs-lookup-card">
+      <h1 class="tgs-lookup-title">Tra cứu hóa đơn điện tử</h1>
+      <p class="tgs-lookup-sub">Nhập mã đơn in trên hóa đơn giấy hoặc trong tin nhắn Zalo của cửa hàng.</p>
 
-            <form method="get" action="" class="grid grid-cols-1 sm:grid-cols-4 gap-3 mb-4">
-        <div>
-          <label for="order_code" class="block text-xs font-semibold text-slate-600 mb-1">Mã đơn</label>
-          <input id="order_code" name="order_code" type="text" value="<?php echo esc_attr($params['order_code']); ?>"
-                                 class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" placeholder="Ví dụ: HD1_A4K9Q" required />
-        </div>
-        <div class="flex items-end">
-          <button type="submit" class="w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700">
-            Tra cứu
-          </button>
-        </div>
+      <form method="get" action="" class="tgs-lookup-form">
+        <input id="order_code" name="order_code" type="text" autocomplete="off"
+               value="<?php echo esc_attr($params['order_code']); ?>"
+               placeholder="Ví dụ: 29001AA06404" required />
+        <button type="submit">Tra cứu</button>
       </form>
 
-      <div id="lookup-message" class="mb-4 text-sm"></div>
-
-      <div id="receipt-host" class="bg-gray-50 rounded-xl p-3 sm:p-4 min-h-[180px]">
-        <div class="text-sm text-slate-500">Nhập thông tin hoặc mở link có sẵn tham số để xem hóa đơn.</div>
-      </div>
+      <div id="lookup-message"></div>
     </div>
+
+    <div id="bills-host"></div>
+
+    <p class="tgs-lookup-note">
+      Hóa đơn hiển thị đúng như bản in tại cửa hàng.<br>
+      Cần hỗ trợ, vui lòng liên hệ tổng đài <strong>1900 636605</strong>.
+    </p>
   </div>
 
   <script src="<?php echo esc_url(content_url('plugins/tgs_pos/assets/js/pos-receipt-template.js')); ?>"></script>
   <script>
     (function () {
       var payload = <?php echo wp_json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
-      var host = document.getElementById('receipt-host');
-      var message = document.getElementById('lookup-message');
+      var host = document.getElementById('bills-host');
+      var messageBox = document.getElementById('lookup-message');
 
-      function setMessage(text, type) {
-        message.textContent = text || '';
+      function setMessage(text, kind) {
         if (!text) {
-          message.className = 'mb-4 text-sm';
+          messageBox.className = '';
+          messageBox.textContent = '';
           return;
         }
-        if (type === 'error') {
-          message.className = 'mb-4 text-sm rounded-lg border border-red-300 bg-red-50 text-red-700 px-3 py-2';
-          return;
+        messageBox.className = 'tgs-lookup-msg tgs-lookup-msg--' + (kind === 'error' ? 'error' : 'ok');
+        messageBox.textContent = text;
+      }
+
+      /*
+       * "Da" của bill lấy nguyên từ POS, chỉ đổi selector.
+       *
+       * Skin bên POS bọc trong #receipt-content vì ở đó chỉ có MỘT tờ bill trên
+       * màn hình. Trang này in cả phiếu cha lẫn phiếu tách nên phải có nhiều tờ,
+       * mà id thì không được trùng — đổi sang class .tgs-receipt-paper. Vẫn là
+       * một nguồn CSS duy nhất: sửa bill bên POS là ở đây đổi theo.
+       */
+      function injectSkin() {
+        if (!window.TGSReceiptTemplate || typeof window.TGSReceiptTemplate.getSkinStyles !== 'function') {
+          return false;
         }
-        message.className = 'mb-4 text-sm rounded-lg border border-emerald-300 bg-emerald-50 text-emerald-700 px-3 py-2';
+        if (document.getElementById('tgs-lookup-receipt-skin')) {
+          return true;
+        }
+
+        var style = document.createElement('style');
+        style.id = 'tgs-lookup-receipt-skin';
+        style.textContent = window.TGSReceiptTemplate
+          .getSkinStyles()
+          .replace(/#receipt-content/g, '.tgs-receipt-paper');
+        document.head.appendChild(style);
+
+        return true;
       }
 
       if (!payload || !payload.success) {
         if (payload && payload.message) {
           setMessage(payload.message, 'error');
-          host.innerHTML = '<div class="text-sm text-slate-500">Không có dữ liệu hóa đơn để hiển thị.</div>';
         }
         return;
       }
 
-      if (!window.TGSReceiptTemplate || typeof window.TGSReceiptTemplate.generate !== 'function') {
-        setMessage('Không tải được module mẫu hóa đơn từ POS.', 'error');
-        host.innerHTML = '<div class="text-sm text-red-600">Thiếu TGSReceiptTemplate.</div>';
+      if (!injectSkin() || typeof window.TGSReceiptTemplate.generate !== 'function') {
+        setMessage('Không tải được mẫu hóa đơn. Vui lòng thử lại sau.', 'error');
         return;
       }
 
-      try {
-        var html = window.TGSReceiptTemplate.generate(payload.order || {}, payload.store || {});
-        host.innerHTML = html;
-        setMessage('Đã tra cứu thành công hóa đơn ' + (payload.order.code || ''), 'success');
-      } catch (err) {
-        setMessage((err && err.message) ? err.message : 'Lỗi khi render hóa đơn.', 'error');
-        host.innerHTML = '<div class="text-sm text-red-600">Không thể hiển thị hóa đơn.</div>';
+      var bills = Array.isArray(payload.bills) ? payload.bills : [];
+      var rendered = 0;
+
+      bills.forEach(function (bill) {
+        if (!bill || !bill.order) {
+          return;
+        }
+
+        var wrap = document.createElement('div');
+        wrap.className = 'tgs-bill' + (bill.role === 'split' ? ' tgs-bill--split' : '');
+
+        var label = document.createElement('div');
+        label.className = 'tgs-bill__label';
+        var chip = document.createElement('span');
+        chip.textContent = (bill.label || 'Hóa đơn') + ' · ' + (bill.order.code || '');
+        label.appendChild(chip);
+        wrap.appendChild(label);
+
+        var paper = document.createElement('div');
+        paper.className = 'tgs-receipt-paper';
+
+        try {
+          paper.innerHTML = window.TGSReceiptTemplate.generate(bill.order, payload.store || {});
+        } catch (err) {
+          paper.textContent = 'Không hiển thị được hóa đơn này.';
+        }
+
+        wrap.appendChild(paper);
+        host.appendChild(wrap);
+        rendered += 1;
+      });
+
+      if (rendered === 0) {
+        setMessage('Không có dữ liệu hóa đơn để hiển thị.', 'error');
+        return;
       }
+
+      setMessage(
+        rendered > 1
+          ? 'Đơn hàng này gồm ' + rendered + ' phiếu (phiếu bán hàng và phiếu tách hàng khuyến mãi).'
+          : 'Đã tìm thấy hóa đơn.',
+        'ok'
+      );
     })();
   </script>
 </body>

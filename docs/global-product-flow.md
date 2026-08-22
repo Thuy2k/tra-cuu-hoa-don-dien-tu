@@ -1,5 +1,13 @@
 # Luồng sản phẩm global cho tra cứu hóa đơn điện tử
 
+> ⚠ **ĐÃ LỖI THỜI (22/08/2026).** Plugin không còn tự đọc sản phẩm nữa: toàn bộ
+> dòng hàng trên bill nay lấy từ `TGS_POS_Ajax_Order::get_order_receipt_data()`
+> bên `tgs_pos` — cùng hàm màn Đơn hàng dùng để in lại bill. Lớp
+> `TGS_Invoice_Lookup_Global_Products` đã gỡ bỏ.
+>
+> Xem `docs/bill-va-tra-cuu.md`. Giữ file này lại vì phần nguyên tắc đọc sản
+> phẩm global (không đụng bảng local) vẫn đúng và vẫn là luật chung.
+
 Tài liệu này ghi lại chuẩn đọc sản phẩm của plugin `tra-cuu-hoa-don-dien-tu`.
 
 ## Nguyên tắc
