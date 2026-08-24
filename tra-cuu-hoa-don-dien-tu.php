@@ -355,6 +355,15 @@ final class TGS_Invoice_Lookup_Public
     </p>
   </div>
 
+  <?php
+  /*
+   * Luật "khách lẻ ⇒ Bán cho người tiêu dùng" — phải nạp TRƯỚC file dựng bill,
+   * vì pos-receipt-template.js gọi window.tgsBuyerDisplayName() khi vẽ dòng
+   * "Khách hàng". Thiếu file này thì bill vẫn chạy nhưng ghi lại "Khách lẻ" —
+   * khác với bản in ở quầy và khác với hoá đơn đã gửi cơ quan thuế.
+   */
+  ?>
+  <script src="<?php echo esc_url(content_url('plugins/tgs_pos/assets/js/tgs-retail-buyer.js')); ?>"></script>
   <script src="<?php echo esc_url(content_url('plugins/tgs_pos/assets/js/pos-receipt-template.js')); ?>"></script>
   <script>
     (function () {
