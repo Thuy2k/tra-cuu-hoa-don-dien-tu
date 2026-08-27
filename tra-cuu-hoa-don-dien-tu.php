@@ -340,7 +340,7 @@ final class TGS_Invoice_Lookup_Public
       <form method="get" action="" class="tgs-lookup-form">
         <input id="order_code" name="order_code" type="text" autocomplete="off"
                value="<?php echo esc_attr($params['order_code']); ?>"
-               placeholder="Ví dụ: 29001AA06404" required />
+               placeholder="Ví dụ: 26003B01K23" required />
         <button type="submit">Tra cứu</button>
       </form>
 

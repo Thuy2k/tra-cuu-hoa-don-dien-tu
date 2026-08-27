@@ -43,25 +43,31 @@ Mỗi shop là một site, **mỗi site một bảng `local_ledger` riêng**. N�
 phải xác định shop trước, `switch_to_blog()`, rồi mới đọc phiếu.
 
 ```
-29001 AA 06404 [Z]
-└─┬─┘ └┬┘ └─┬─┘ └┬┘
-  │    │    │    └── có Z = phiếu TÁCH hàng khuyến mãi của mã liền trước
-  │    │    └─────── số chạy 5 chữ số
-  │    └──────────── nhóm 2 chữ cái (AA→AB→…)
-  └───────────────── mã shop = wp_blogs.tgs_site_code
+26003 B 01 K 23 [Z]        26003 . B 0 M 12 [Z]   ← phiếu hoàn
+└─┬─┘ │ └┬┘ │ └┬┘ └┬┘      └─┬─┘ │
+  │   │  │  │  │   └── có Z = phiếu TÁCH hàng khuyến mãi của mã liền trước
+  │   │  │  │  └────── số chạy, mã LUÔN kết thúc bằng chữ số
+  │   │  │  └───────── chữ CHEN ngẫu nhiên, không bao giờ dính chữ B
+  │   │  └──────────── số chạy
+  │   └─────────────── chữ MỐC, luôn là B
+  └─────────────────── mã shop = wp_blogs.tgs_site_code
 ```
 
-Suy ngược: bỏ `Z`, bỏ 2 chữ cái + 5 số ở đuôi, phần còn lại tra trong
-`wp_blogs.tgs_site_code` ra `blog_id`. Quy luật đặt mã nằm ở
-`tgs_pos/includes/class-tgs-pos-sale-code.php` — **hai bên phải đọc/ghi cùng một
-quy luật**, đổi một bên là bên kia tra không ra.
+Suy ngược: bỏ `Z`, **cắt tại chữ `B` đầu tiên** (với phiếu hoàn thì cắt tại dấu
+chấm), phần bên trái tra trong `wp_blogs.tgs_site_code` ra `blog_id`. Mã shop
+toàn số hoặc `CNTEST` nên không chứa chữ B — cắt kiểu này không nhầm được.
 
-### Ba trường hợp đặc biệt
+Thân mã luôn 11 ký tự, kèm `Z` là 12 — trần của phần mềm cũ khi đồng bộ ngược.
+Quy luật đặt mã nằm ở `tgs_pos/includes/class-tgs-pos-sale-code.php` — **hai bên
+phải đọc/ghi cùng một quy luật**, đổi một bên là bên kia tra không ra.
+
+### Bốn trường hợp đặc biệt
 
 | Mã | Xử lý |
 |---|---|
-| `CNTESTAA00077` | `CNTEST` là tiền tố dùng chung cho **mọi** site chưa khai `tgs_site_code` → phải dò lần lượt các site đó cho tới khi tìm thấy phiếu |
-| `HD7_G4GST` | Dạng cũ, mã tự nói ra `blog_id` — vẫn tra được, khách còn giữ bill cũ |
+| `26003AA01216` | Dạng cũ ({mã shop} + 2 chữ cái + 5 số) — vẫn tra được, sổ còn hàng nghìn phiếu như thế |
+| `CNTESTB50M2` | `CNTEST` là tiền tố dùng chung cho **mọi** site chưa khai `tgs_site_code` → phải dò lần lượt các site đó cho tới khi tìm thấy phiếu |
+| `HD7_G4GST` | Dạng cũ hơn nữa, mã tự nói ra `blog_id` — vẫn tra được, khách còn giữ bill cũ |
 | Hai site khai trùng mã shop | Trả về nhiều ứng viên, dò lần lượt |
 
 Vì vậy `candidate_blog_ids()` trả về **mảng**, không phải một số.
@@ -87,8 +93,8 @@ Quan hệ cha ↔ con lấy từ chính `get_order_receipt_data()`: khoá `paren
 ## 4. Ba đường vào trang
 
 ```
-/tra-cuu-hoa-don-dien-tu?order_code=29001AA06404
-/tra-cuu-hoa-don-dien-tu?order_code=29001AA06404&blog_id=7   (ép đúng shop)
+/tra-cuu-hoa-don-dien-tu?order_code=26003B01K23
+/tra-cuu-hoa-don-dien-tu?order_code=26003B01K23&blog_id=7   (ép đúng shop)
 /tra-cuu-hoa-don-dien-tu?q=<payload>.<chữ ký>                (link có hạn dùng)
 ```
 

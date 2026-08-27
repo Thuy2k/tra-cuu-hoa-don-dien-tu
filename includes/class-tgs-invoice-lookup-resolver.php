@@ -11,19 +11,25 @@
  *
  * ── ĐỌC MÃ ĐƠN ─────────────────────────────────────────────────────────────
  *
- *     29001 AA 06404 [Z]
- *     └─┬─┘ └┬┘ └─┬─┘ └┬┘
- *       │    │    │    └── có Z = phiếu TÁCH hàng khuyến mãi của mã liền trước
- *       │    │    └─────── số chạy 5 chữ số
- *       │    └──────────── nhóm 2 chữ cái (AA→AB→…)
- *       └───────────────── mã shop = wp_blogs.tgs_site_code
+ * DẠNG ĐANG DÙNG — chữ B là mốc, cắt tại chữ B ĐẦU TIÊN là ra mã shop:
  *
- * Suy ngược: cắt bỏ Z, cắt bỏ 2 chữ cái + 5 số ở đuôi, phần còn lại là mã shop.
- * Tra mã đó trong wp_blogs ra blog_id. Xem TGS_POS_Sale_Code bên tgs_pos — hai
- * bên phải đọc/ghi cùng một quy luật.
+ *     26003 B 01 K 23 [Z]        26003 . B 0 M 12 [Z]   ← phiếu hoàn
+ *     └─┬─┘ │ └┬┘ │ └┬┘ └┬┘      └─┬─┘ │
+ *       │   │  │  │  │   └── có Z = phiếu TÁCH hàng khuyến mãi
+ *       │   │  │  │  └────── số chạy, luôn kết thúc bằng chữ số
+ *       │   │  │  └───────── chữ CHEN ngẫu nhiên, không bao giờ dính chữ B
+ *       │   │  └──────────── số chạy
+ *       │   └─────────────── chữ MỐC B
+ *       └─────────────────── mã shop = wp_blogs.tgs_site_code
  *
- * Dạng cũ HD{blog_id}_{chuỗi} vẫn tra được: phiếu bán từ trước vẫn còn trong sổ,
- * và khách vẫn giữ những tờ bill đó.
+ * DẠNG CŨ vẫn phải tra được — khách còn giữ những tờ bill đó:
+ *
+ *     29001 AA 06404 [Z]     nhóm 2 chữ cái + 5 số
+ *     HD{blog_id}_{chuỗi}    mã tự nói ra blog_id
+ *
+ * Tra mã shop trong wp_blogs ra blog_id. Xem TGS_POS_Sale_Code bên tgs_pos —
+ * hai bên phải đọc/ghi cùng một quy luật; bên đó đổi dạng mã là phải sửa cả
+ * đây, nếu không quét QR trên bill Zalo sẽ không ra shop nào.
  *
  * @package tra-cuu-hoa-don-dien-tu
  */
@@ -37,6 +43,12 @@ class TGS_Invoice_Lookup_Resolver
 
     /** Đuôi của phiếu tách hàng khuyến mãi. */
     const SPLIT_SUFFIX = 'Z';
+
+    /**
+     * Chữ mốc ngăn giữa mã shop và phần số — trùng với
+     * TGS_POS_Sale_Code::MARKER_LETTER. Hai bên phải giống nhau tuyệt đối.
+     */
+    const MARKER_LETTER = 'B';
 
     /**
      * Chuẩn hoá mã khách nhập: bỏ khoảng trắng, viết hoa.
@@ -66,12 +78,27 @@ class TGS_Invoice_Lookup_Resolver
     }
 
     /**
-     * Mã shop nằm ở đầu mã đơn. Trả về '' nếu mã không đúng dạng mới.
+     * Mã shop nằm ở đầu mã đơn. Trả về '' nếu mã không đọc được dạng nào.
+     *
+     * Thứ tự dò: phiếu hoàn (có dấu chấm) → phiếu bán dạng đang dùng (chữ mốc
+     * B) → dạng cũ (2 chữ cái + 5 số). Mã shop toàn số hoặc CNTEST nên không
+     * chứa chữ B, vì thế cắt tại chữ B đầu tiên là đúng mã shop.
      */
     public static function site_prefix_of($code)
     {
         $code = self::parent_code_of(self::normalize_code($code));
 
+        // Phiếu hoàn: {mã shop}.B{số}[chữ chen]{số}
+        if (preg_match('/^([A-Z0-9]+)\.' . self::MARKER_LETTER . '\d+(?:[A-Z]\d+)?$/', $code, $m)) {
+            return $m[1];
+        }
+
+        // Phiếu bán dạng đang dùng: {mã shop}B{số}[chữ chen]{số}
+        if (preg_match('/^([A-Z0-9]+?)' . self::MARKER_LETTER . '\d+(?:[A-Z]\d+)?$/', $code, $m)) {
+            return $m[1];
+        }
+
+        // Dạng cũ: {mã shop}{2 chữ cái}{5 số}
         if (preg_match('/^([A-Z0-9]+?)[A-Z]{2}\d{5}$/', $code, $m)) {
             return $m[1];
         }
