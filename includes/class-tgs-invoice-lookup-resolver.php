@@ -11,19 +11,17 @@
  *
  * ── ĐỌC MÃ ĐƠN ─────────────────────────────────────────────────────────────
  *
- * DẠNG ĐANG DÙNG — chữ B là mốc, cắt tại chữ B ĐẦU TIÊN là ra mã shop:
+ * DẠNG ĐANG DÙNG (từ 09/2026) — cắt tại mốc là ra mã shop:
  *
- *     26003 B 01 K 23 [Z]        26003 . B 0 M 12 [Z]   ← phiếu hoàn
- *     └─┬─┘ │ └┬┘ │ └┬┘ └┬┘      └─┬─┘ │
- *       │   │  │  │  │   └── có Z = phiếu TÁCH hàng khuyến mãi
- *       │   │  │  │  └────── số chạy, luôn kết thúc bằng chữ số
- *       │   │  │  └───────── chữ CHEN ngẫu nhiên, không bao giờ dính chữ B
- *       │   │  └──────────── số chạy
- *       │   └─────────────── chữ MỐC B
- *       └─────────────────── mã shop = wp_blogs.tgs_site_code
+ *     2001 AA 000641      phiếu bán   (mốc "AA")
+ *     2001 Z  000641 Z    bill Z      (mốc "Z" + đuôi "Z")
+ *     02011 . A 00107     phiếu hoàn  (dấu "." + mốc "A")
+ *     02011 . Z 0107 Z    hoàn bill Z (dấu "." + "Z" + đuôi "Z")
  *
  * DẠNG CŨ vẫn phải tra được — khách còn giữ những tờ bill đó:
  *
+ *     26003 B 01 K 23 [Z]    phiếu bán cũ  (mốc B + chữ chen)
+ *     26003 . B 0 M 12 [Z]   phiếu hoàn cũ (dấu "." + mốc B)
  *     29001 AA 06404 [Z]     nhóm 2 chữ cái + 5 số
  *     HD{blog_id}_{chuỗi}    mã tự nói ra blog_id
  *
@@ -99,7 +97,18 @@ class TGS_Invoice_Lookup_Resolver
             return $m[1];
         }
 
-        // Phiếu hoàn: {mã shop}.B{số}[chữ chen]{số}
+        // Phiếu hoàn DẠNG ĐANG DÙNG: {mã shop}.A{số}
+        if (preg_match('/^([A-Z0-9]+?)\.A\d+$/', $code, $m)) {
+            return $m[1];
+        }
+
+        // Hoàn của bill Z dạng đang dùng, sau khi parent_code_of() bỏ 1 "Z" cuối:
+        // {mã shop}.Z{số}
+        if (preg_match('/^([A-Z0-9]+?)\.Z\d+$/', $code, $m)) {
+            return $m[1];
+        }
+
+        // Phiếu hoàn DẠNG CŨ: {mã shop}.B{số}[chữ chen]{số}
         if (preg_match('/^([A-Z0-9]+)\.' . self::MARKER_LETTER . '\d+(?:[A-Z]\d+)?$/', $code, $m)) {
             return $m[1];
         }
