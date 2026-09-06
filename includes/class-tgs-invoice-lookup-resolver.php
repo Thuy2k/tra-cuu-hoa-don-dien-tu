@@ -88,12 +88,23 @@ class TGS_Invoice_Lookup_Resolver
     {
         $code = self::parent_code_of(self::normalize_code($code));
 
+        // Phiếu bán DẠNG ĐANG DÙNG: {mã shop}AA{số}
+        if (preg_match('/^([A-Z0-9]+?)AA\d+$/', $code, $m)) {
+            return $m[1];
+        }
+
+        // Bill Z dạng đang dùng, sau khi parent_code_of() đã bỏ 1 "Z" cuối:
+        // {mã shop}Z{số}
+        if (preg_match('/^([A-Z0-9]+?)Z\d+$/', $code, $m)) {
+            return $m[1];
+        }
+
         // Phiếu hoàn: {mã shop}.B{số}[chữ chen]{số}
         if (preg_match('/^([A-Z0-9]+)\.' . self::MARKER_LETTER . '\d+(?:[A-Z]\d+)?$/', $code, $m)) {
             return $m[1];
         }
 
-        // Phiếu bán dạng đang dùng: {mã shop}B{số}[chữ chen]{số}
+        // Phiếu bán DẠNG CŨ: {mã shop}B{số}[chữ chen]{số}
         if (preg_match('/^([A-Z0-9]+?)' . self::MARKER_LETTER . '\d+(?:[A-Z]\d+)?$/', $code, $m)) {
             return $m[1];
         }
