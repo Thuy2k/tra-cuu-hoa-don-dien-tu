@@ -39,6 +39,15 @@ class TGS_Invoice_Lookup_Resolver
     /** Tiền tố dùng cho site chưa khai tgs_site_code — trùng với TGS_POS_Sale_Code. */
     const FALLBACK_SITE_PREFIX = 'CNTEST';
 
+    /** Tiền tố dự phòng từ 09/10/2026 (TGS_POS_Sale_Code::FALLBACK_SITE_PREFIX). */
+    const FALLBACK_SITE_PREFIX_NEW = 'CNTES';
+
+    /** Mã mang tiền tố dùng chung cho mọi site chưa khai tgs_site_code. */
+    private static function is_fallback_prefix($prefix)
+    {
+        return $prefix === self::FALLBACK_SITE_PREFIX || $prefix === self::FALLBACK_SITE_PREFIX_NEW;
+    }
+
     /** Đuôi của phiếu tách hàng khuyến mãi. */
     const SPLIT_SUFFIX = 'Z';
 
@@ -86,8 +95,10 @@ class TGS_Invoice_Lookup_Resolver
     {
         $code = self::parent_code_of(self::normalize_code($code));
 
-        // Phiếu bán DẠNG ĐANG DÙNG: {mã shop}AA{số}
-        if (preg_match('/^([A-Z0-9]+?)AA\d+$/', $code, $m)) {
+        // Phiếu bán DẠNG ĐANG DÙNG (09/10/2026 — hai chế độ mã, xem
+        // tgs_pos/docs/ma-phieu-hai-che-do.md): {mã shop}{cặp chữ dải AA, AB… / BT, BU…}{số}.
+        // Bill Z = mã cha + "Z" — parent_code_of() đã bỏ chữ Z cuối ở trên.
+        if (preg_match('/^([A-Z0-9]+?)[A-Z]{2}\d+$/', $code, $m)) {
             return $m[1];
         }
 
@@ -161,13 +172,16 @@ class TGS_Invoice_Lookup_Resolver
 
         if (!self::blogs_has_site_code_column()) {
             // Chưa có cột thì mọi site đều đang dùng tiền tố dự phòng
-            return $prefix === self::FALLBACK_SITE_PREFIX ? self::all_blog_ids() : [];
+            return self::is_fallback_prefix($prefix) ? self::all_blog_ids() : [];
         }
 
         $matched = $wpdb->get_col($wpdb->prepare(
             "SELECT blog_id FROM {$blogs_table}
-             WHERE tgs_site_code = %s AND (deleted = 0 OR deleted IS NULL)
-             ORDER BY blog_id ASC",
+             WHERE (tgs_site_code = %s OR UPPER(LEFT(tgs_site_code, 5)) = %s)
+               AND (deleted = 0 OR deleted IS NULL)
+             ORDER BY (tgs_site_code = %s) DESC, blog_id ASC",
+            $prefix,
+            $prefix, // mã phiếu chỉ mang 5 ký tự đầu của mã shop (CNTEST → CNTES)
             $prefix
         ));
         $matched = array_map('intval', (array) $matched);
@@ -177,7 +191,7 @@ class TGS_Invoice_Lookup_Resolver
          * đó. Không dò thì shop chưa khai mã tra cứu là báo "không tìm thấy",
          * trong khi phiếu vẫn nằm nguyên trong sổ của họ.
          */
-        if ($prefix === self::FALLBACK_SITE_PREFIX) {
+        if (self::is_fallback_prefix($prefix)) {
             $unset_code = $wpdb->get_col(
                 "SELECT blog_id FROM {$blogs_table}
                  WHERE (tgs_site_code IS NULL OR tgs_site_code = '')
